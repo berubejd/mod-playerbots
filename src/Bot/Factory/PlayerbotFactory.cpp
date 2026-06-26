@@ -634,6 +634,7 @@ void PlayerbotFactory::Randomize(bool incremental)
         ClearSpells();
         ResetQuests();
         ClearAllItems();
+        ClearActionBars();
     }
     ClearInventory();
     bot->RemoveAllSpellCooldown();
@@ -860,6 +861,7 @@ void PlayerbotFactory::Randomize(bool incremental)
 
     pmo = sPerfMonitor.start(PERF_MON_RNDBOT, "PlayerbotFactory_Save");
     LOG_DEBUG("playerbots", "Saving to DB...");
+    PruneInvalidActionButtons();
     bot->SetMoney(urand(level * 100000, level * 5 * 100000));
     bot->SetHealth(bot->GetMaxHealth());
     bot->SetPower(POWER_MANA, bot->GetMaxPower(POWER_MANA));
@@ -1437,6 +1439,7 @@ void PlayerbotFactory::ClearEverything()
     bot->resetTalents(true);
     ClearSkills();
     ClearSpells();
+    ClearActionBars();
     ClearInventory();
     ResetQuests();
     // bot->SaveToDB(false, false);
@@ -1460,6 +1463,28 @@ void PlayerbotFactory::ClearSpells()
     for (std::list<uint32>::iterator i = spells.begin(); i != spells.end(); ++i)
     {
         bot->removeSpell(*i, SPEC_MASK_ALL, false);
+    }
+}
+
+void PlayerbotFactory::ClearActionBars()
+{
+    for (uint8 button = 0; button < MAX_ACTION_BUTTONS; ++button)
+    {
+        if (bot->GetActionButton(button))
+            bot->removeActionButton(button);
+    }
+}
+
+void PlayerbotFactory::PruneInvalidActionButtons()
+{
+    for (uint8 button = 0; button < MAX_ACTION_BUTTONS; ++button)
+    {
+        ActionButton const* actionButton = bot->GetActionButton(button);
+        if (!actionButton)
+            continue;
+
+        if (!bot->IsActionButtonDataValid(button, actionButton->GetAction(), actionButton->GetType()))
+            bot->removeActionButton(button);
     }
 }
 

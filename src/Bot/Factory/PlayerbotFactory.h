@@ -181,6 +181,8 @@ private:
     void UpdateTradeSkills();
     void SetRandomSkill(uint16 id);
     void ClearSpells();
+    void ClearActionBars();
+    void PruneInvalidActionButtons();
     void ClearSkills();
     void InitTalents(uint32 specNo);
     void InitTalentsByTemplate(uint32 specNo);
