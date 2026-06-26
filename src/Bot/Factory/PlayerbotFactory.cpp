@@ -622,7 +622,7 @@ void PlayerbotFactory::Randomize(bool incremental)
     LOG_DEBUG("playerbots", "Resetting player...");
     PerfMonitorOperation* pmo = sPerfMonitor.start(PERF_MON_RNDBOT, "PlayerbotFactory_Reset");
 
-    if (!sPlayerbotAIConfig.equipAndSpecPersistence ||
+    if (!incremental || !sPlayerbotAIConfig.equipAndSpecPersistence ||
         level < uint32(sPlayerbotAIConfig.equipAndSpecPersistenceLevel))
     {
         bot->resetTalents(true);
@@ -633,11 +633,7 @@ void PlayerbotFactory::Randomize(bool incremental)
         ClearSkills();
         ClearSpells();
         ResetQuests();
-        if (!sPlayerbotAIConfig.equipAndSpecPersistence ||
-            level < uint32(sPlayerbotAIConfig.equipAndSpecPersistenceLevel))
-        {
-            ClearAllItems();
-        }
+        ClearAllItems();
     }
     ClearInventory();
     bot->RemoveAllSpellCooldown();
@@ -2104,382 +2100,388 @@ void PlayerbotFactory::InitEquipment(bool incremental, bool second_chance)
 {
     if (level < 5)
     {
-        // original items
-        if (CharStartOutfitEntry const* oEntry = GetCharStartOutfitEntry(bot->getRace(), bot->getClass(), bot->getGender()))
-        {
-            for (int j = 0; j < MAX_OUTFIT_ITEMS; ++j)
-            {
-                if (oEntry->ItemId[j] <= 0)
-                    continue;
-
-                uint32 itemId = oEntry->ItemId[j];
-
-                // skip hearthstone
-                if (itemId == 6948)
-                    continue;
-
-                // just skip, reported in ObjectMgr::LoadItemTemplates
-                ItemTemplate const* iProto = sObjectMgr->GetItemTemplate(itemId);
-                if (!iProto)
-                    continue;
-
-                // BuyCount by default
-                uint32 count = iProto->BuyCount;
-
-                // special amount for food/drink
-                if (iProto->Class == ITEM_CLASS_CONSUMABLE && iProto->SubClass == ITEM_SUBCLASS_FOOD)
-                {
-                    continue;
-                }
-
-                if (bot->HasItemCount(itemId, count))
-                {
-                    continue;
-                }
-
-                bot->StoreNewItemInBestSlots(itemId, count);
-            }
-        }
+        InitStartingOutfit();
         return;
     }
 
-    std::unordered_map<uint8, std::vector<std::pair<uint32, int32>>> items;
-    // int tab = AiFactory::GetPlayerSpecTab(bot);
-
-    uint32 blevel = bot->GetLevel();
-    int32 delta = std::min(blevel, 10u);
-
-    bool isPvp = sRandomPlayerbotMgr.IsSpecPvp(bot->GetGUID().GetCounter(), bot->getClass());
+    ScrubInvalidEquippedItems();
 
     StatsWeightCalculator calculator(bot);
+    bool isPvp = sRandomPlayerbotMgr.IsSpecPvp(bot->GetGUID().GetCounter(), bot->getClass());
     if (isPvp)
         calculator.SetPvpSpec(true);
 
-    // Pre-select CC-break trinket for PvP specs: best available by item level
-    // that the bot meets the level requirement for.
-    // Humans (Every Man for Himself) and Undead (Will of the Forsaken) have a
-    // racial that shares the PvP trinket cooldown, so they don't need one.
-    bool racialHasCcBreak = (bot->getRace() == RACE_HUMAN || bot->getRace() == RACE_UNDEAD_PLAYER);
-    uint32 pvpTrinket1 = 0;
-    if (isPvp && level >= 50 && !racialHasCcBreak)
+    uint32 pvpTrinket1 = isPvp ? SelectPvpCcBreakTrinket() : 0;
+
+    std::unordered_map<uint8, std::vector<EquipCandidate>> candidatesBySlot;
+
+    uint32 passes = second_chance ? 2 : 1;
+    for (uint32 pass = 0; pass < passes; ++pass)
     {
-        for (uint32 itemId : ccBreakTrinketCache)
+        bool refinementPass = (pass == 1);
+
+        for (uint32 raw : initSlotsOrder)
         {
-            ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemId);
-            if (!proto) continue;
-            // Respect gear quality limit: trinket must not exceed itemQuality setting
-            if (static_cast<int32>(proto->Quality) > static_cast<int32>(itemQuality)) continue;
-            if (proto->RequiredLevel > level) continue;
-            if (!CanEquipItem(proto)) continue;
-            uint16 dest;
-            if (!CanEquipUnseenItem(EQUIPMENT_SLOT_TRINKET1, dest, itemId)) continue;
-            pvpTrinket1 = itemId;
-            break;
-        }
-    }
+            uint8 slot = static_cast<uint8>(raw);
 
-    for (int32 slot : initSlotsOrder)
-    {
-        if (slot == EQUIPMENT_SLOT_TABARD || slot == EQUIPMENT_SLOT_BODY)
-            continue;
-
-        if (level < 50 && (slot == EQUIPMENT_SLOT_TRINKET1 || slot == EQUIPMENT_SLOT_TRINKET2))
-            continue;
-
-        if (level < 30 && (slot == EQUIPMENT_SLOT_NECK || slot == EQUIPMENT_SLOT_HEAD))
-            continue;
-
-        if (level < 20 && (slot == EQUIPMENT_SLOT_FINGER1 || slot == EQUIPMENT_SLOT_FINGER2))
-            continue;
-
-        if (level < 5 && (slot != EQUIPMENT_SLOT_MAINHAND) && (slot != EQUIPMENT_SLOT_OFFHAND) &&
-            (slot != EQUIPMENT_SLOT_FEET) && (slot != EQUIPMENT_SLOT_LEGS) && (slot != EQUIPMENT_SLOT_CHEST) &&
-            (slot != EQUIPMENT_SLOT_RANGED))
-            continue;
-
-        // Exclude resilience weighting for trinkets
-        bool isTrinketSlot = (slot == EQUIPMENT_SLOT_TRINKET1 || slot == EQUIPMENT_SLOT_TRINKET2);
-        calculator.SetExcludeResilience(isTrinketSlot);
-
-        Item* oldItem = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
-
-        if (second_chance && oldItem)
-        {
-            bot->DestroyItem(INVENTORY_SLOT_BAG_0, slot, true);
-        }
-
-        oldItem = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
-
-        // PvP specs: force TRINKET1 to the best available CC-break trinket.
-        if (slot == EQUIPMENT_SLOT_TRINKET1 && pvpTrinket1 != 0)
-        {
-            if (oldItem)
-            {
-                uint8 bagIndex = oldItem->GetBagSlot();
-                uint8 oldSlot  = oldItem->GetSlot();
-                uint8 dstBag   = NULL_BAG;
-                WorldPacket packet(CMSG_AUTOSTORE_BAG_ITEM, 3);
-                packet << bagIndex << oldSlot << dstBag;
-                WorldPackets::Item::AutoStoreBagItem nicePacket(std::move(packet));
-                nicePacket.Read();
-                bot->GetSession()->HandleAutoStoreBagItemOpcode(nicePacket);
-                oldItem = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
-                if (oldItem) continue;
-            }
-            uint16 dest;
-            if (CanEquipUnseenItem(slot, dest, pvpTrinket1))
-                bot->EquipNewItem(dest, pvpTrinket1, true);
-            continue;
-        }
-
-        int32 desiredQuality = itemQuality;
-        if (urand(0, 100) < 100 * sPlayerbotAIConfig.randomGearLoweringChance && desiredQuality > ITEM_QUALITY_NORMAL)
-            desiredQuality--;
-
-        do
-        {
-            for (uint32 requiredLevel = bot->GetLevel(); requiredLevel > uint32(std::max((int32)bot->GetLevel() - delta, 0));
-                 requiredLevel--)
-            {
-                for (InventoryType inventoryType : GetPossibleInventoryTypeListBySlot((EquipmentSlots)slot))
-                {
-                    for (uint32 itemId : sRandomItemMgr.GetEquipmentNew(requiredLevel, inventoryType))
-                    {
-                        uint32 skipProb = 25;
-                        if (urand(1, 100) <= skipProb)
-                            continue;
-
-                        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemId);
-                        // disable next expansion gear
-                        if (sPlayerbotAIConfig.limitGearExpansion && bot->GetLevel() <= 60 && itemId >= 23728)
-                            continue;
-
-                        if (sPlayerbotAIConfig.limitGearExpansion && bot->GetLevel() <= 70 && itemId >= 35570 &&
-                            itemId != 36737 && itemId != 37739 &&
-                            itemId != 37740)  // transition point from TBC -> WOTLK isn't as clear, and there are other
-                                              // wearable TBC items above 35570 but nothing of significance
-                            continue;
-
-                        if (!proto)
-                            continue;
-
-                        bool shouldCheckGS = desiredQuality > ITEM_QUALITY_NORMAL;
-
-                        if (shouldCheckGS && gearScoreLimit != 0 &&
-                            CalcMixedGearScore(proto->ItemLevel, proto->Quality) > gearScoreLimit)
-                        {
-                            continue;
-                        }
-                        if (proto->Class != ITEM_CLASS_WEAPON && proto->Class != ITEM_CLASS_ARMOR)
-                            continue;
-
-                        if (proto->Quality != uint32(desiredQuality))
-                            continue;
-
-                        if (proto->Class == ITEM_CLASS_ARMOR &&
-                            (slot == EQUIPMENT_SLOT_HEAD || slot == EQUIPMENT_SLOT_SHOULDERS ||
-                             slot == EQUIPMENT_SLOT_CHEST || slot == EQUIPMENT_SLOT_WAIST ||
-                             slot == EQUIPMENT_SLOT_LEGS || slot == EQUIPMENT_SLOT_FEET ||
-                             slot == EQUIPMENT_SLOT_WRISTS || slot == EQUIPMENT_SLOT_HANDS) &&
-                            !CanEquipArmor(proto))
-                            continue;
-
-                        if (proto->Class == ITEM_CLASS_WEAPON && !CanEquipWeapon(proto))
-                            continue;
-
-                        if (slot == EQUIPMENT_SLOT_OFFHAND && bot->getClass() == CLASS_ROGUE &&
-                            proto->Class != ITEM_CLASS_WEAPON)
-                            continue;
-
-                        int32 bestRandomProp = 0;
-                        if (proto->RandomProperty || proto->RandomSuffix)
-                            bestRandomProp = calculator.PickBestRandomPropertyId(itemId);
-                        items[slot].push_back({itemId, bestRandomProp});
-                    }
-                }
-            }
-        } while (items[slot].size() < 25 && desiredQuality-- > ITEM_QUALITY_POOR);
-
-        std::vector<std::pair<uint32, int32>>& ids = items[slot];
-        if (ids.empty())
-        {
-            continue;
-        }
-
-        float bestScoreForSlot = -1;
-        uint32 bestItemForSlot = 0;
-        int32 bestRandomPropForSlot = 0;
-        for (size_t index = 0; index < ids.size(); index++)
-        {
-            uint32 newItemId = ids[index].first;
-            int32 newItemProp = ids[index].second;
-
-            ItemTemplate const* proto = sObjectMgr->GetItemTemplate(newItemId);
-
-            float cur_score = calculator.CalculateItem(newItemId, newItemProp, slot);
-
-            if (cur_score > 0.0f && proto && proto->Class == ITEM_CLASS_ARMOR && sPlayerbotAIConfig.preferClassArmorType)
-            {
-                uint8 preferredArmorType = GetPreferredArmorType(bot->getClass());
-                if (preferredArmorType != 0 && proto->SubClass == preferredArmorType)
-                    cur_score *= 3.0f;  // 3x multiplier for preferred armor type
-            }
-
-            if (cur_score > bestScoreForSlot)
-            {
-                // delay heavy check to here
-                if (!CanEquipItem(proto))
-                    continue;
-                uint16 dest;
-                if (!CanEquipUnseenItem(slot, dest, newItemId))
-                    continue;
-                bestScoreForSlot = cur_score;
-                bestItemForSlot = newItemId;
-                bestRandomPropForSlot = newItemProp;
-            }
-        }
-
-        if (bestItemForSlot == 0)
-        {
-            continue;
-        }
-        uint16 dest;
-        if (!CanEquipUnseenItem(slot, dest, bestItemForSlot))
-        {
-            continue;
-        }
-
-        if (incremental && oldItem)
-        {
-            float old_score = calculator.CalculateItem(oldItem->GetEntry(), oldItem->GetItemRandomPropertyId(), slot);
-            if (bestScoreForSlot < 1.2f * old_score)
-                continue;
-        }
-        if (oldItem)
-        {
-            uint8 bagIndex = oldItem->GetBagSlot();
-            uint8 slot = oldItem->GetSlot();
-            uint8 dstBag = NULL_BAG;
-
-            WorldPacket packet(CMSG_AUTOSTORE_BAG_ITEM, 3);
-            packet << bagIndex << slot << dstBag;
-            WorldPackets::Item::AutoStoreBagItem nicePacket(std::move(packet));
-            nicePacket.Read();
-            bot->GetSession()->HandleAutoStoreBagItemOpcode(nicePacket);
-        }
-
-        oldItem = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
-        // fail to store in bag
-        if (oldItem)
-            continue;
-
-        if (Item* equipped = bot->EquipNewItem(dest, bestItemForSlot, true))
-        {
-            if (bestRandomPropForSlot != 0)
-            {
-                uint8 equipSlot = equipped->GetSlot();
-                bot->_ApplyItemMods(equipped, equipSlot, false);
-                equipped->SetItemRandomProperties(bestRandomPropForSlot);
-                bot->_ApplyItemMods(equipped, equipSlot, true);
-            }
-        }
-        bot->AutoUnequipOffhandIfNeed();
-        // if (newItem)
-        // {
-        //     newItem->AddToWorld();
-        // newItem->AddToUpdateQueueOf(bot);
-        // }
-    }
-    // Secondary init for better equips
-    /// @todo: clean up duplicate code
-    if (second_chance)
-    {
-        for (int32 slot : initSlotsOrder)
-        {
-            if (slot == EQUIPMENT_SLOT_TABARD || slot == EQUIPMENT_SLOT_BODY)
-                continue;
-
-            if (level < 50 && (slot == EQUIPMENT_SLOT_TRINKET1 || slot == EQUIPMENT_SLOT_TRINKET2))
-                continue;
-
-            if (level < 30 && (slot == EQUIPMENT_SLOT_NECK || slot == EQUIPMENT_SLOT_HEAD))
-                continue;
-
-            if (level < 20 && (slot == EQUIPMENT_SLOT_FINGER1 || slot == EQUIPMENT_SLOT_FINGER2))
-                continue;
-
-            if (level < 5 && (slot != EQUIPMENT_SLOT_MAINHAND) && (slot != EQUIPMENT_SLOT_OFFHAND) &&
-                (slot != EQUIPMENT_SLOT_FEET) && (slot != EQUIPMENT_SLOT_LEGS) && (slot != EQUIPMENT_SLOT_CHEST) &&
-                (slot != EQUIPMENT_SLOT_RANGED))
-                continue;
-
-            // CC-break trinket was force-equipped in the main pass; leave it alone.
-            if (slot == EQUIPMENT_SLOT_TRINKET1 && pvpTrinket1 != 0)
+            if (!IsSlotAutoEquippable(slot))
                 continue;
 
             bool isTrinketSlot = (slot == EQUIPMENT_SLOT_TRINKET1 || slot == EQUIPMENT_SLOT_TRINKET2);
             calculator.SetExcludeResilience(isTrinketSlot);
 
-            if (Item* oldItem = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
-                bot->DestroyItem(INVENTORY_SLOT_BAG_0, slot, true);
-
-            std::vector<std::pair<uint32, int32>>& ids = items[slot];
-            if (ids.empty())
-                continue;
-
-            float bestScoreForSlot = -1;
-            uint32 bestItemForSlot = 0;
-            int32 bestRandomPropForSlot = 0;
-            for (size_t index = 0; index < ids.size(); index++)
+            if (slot == EQUIPMENT_SLOT_TRINKET1 && pvpTrinket1 != 0)
             {
-                uint32 newItemId = ids[index].first;
-                int32 newItemProp = ids[index].second;
-
-                ItemTemplate const* proto = sObjectMgr->GetItemTemplate(newItemId);
-
-                float cur_score = calculator.CalculateItem(newItemId, newItemProp, slot);
-
-                if (cur_score > 0.0f && proto && proto->Class == ITEM_CLASS_ARMOR && sPlayerbotAIConfig.preferClassArmorType)
-                {
-                    uint8 preferredArmorType = GetPreferredArmorType(bot->getClass());
-                    if (preferredArmorType != 0 && proto->SubClass == preferredArmorType)
-                        cur_score *= 3.0f;  // 3x multiplier for preferred armor type
-                }
-
-                if (cur_score > bestScoreForSlot)
-                {
-                    // delay heavy check to here
-                    if (!CanEquipItem(proto))
-                        continue;
-                    uint16 dest;
-                    if (!CanEquipUnseenItem(slot, dest, newItemId))
-                        continue;
-                    bestScoreForSlot = cur_score;
-                    bestItemForSlot = newItemId;
-                    bestRandomPropForSlot = newItemProp;
-                }
+                if (!refinementPass)
+                    ReplaceEquippedItem(slot, SlotChoice{pvpTrinket1, 0, 0.0f});
+                continue;
             }
 
-            if (bestItemForSlot == 0)
+            if (!refinementPass)
+                candidatesBySlot[slot] = BuildSlotCandidates(slot, calculator);
+
+            std::vector<EquipCandidate> const& cands = candidatesBySlot[slot];
+            if (cands.empty())
                 continue;
 
-            uint16 dest;
-            if (!CanEquipUnseenItem(slot, dest, bestItemForSlot))
-                continue;
-
-            if (Item* equipped = bot->EquipNewItem(dest, bestItemForSlot, true))
+            // Refinement pass: vacate before rescoring so set/overflow weighting matches the
+            // old second_chance loop (evaluate against pass-1 gear on other slots only).
+            if (refinementPass)
             {
-                if (bestRandomPropForSlot != 0)
-                {
-                    uint8 equipSlot = equipped->GetSlot();
-                    bot->_ApplyItemMods(equipped, equipSlot, false);
-                    equipped->SetItemRandomProperties(bestRandomPropForSlot);
-                    bot->_ApplyItemMods(equipped, equipSlot, true);
-                }
+                if (Item* incumbent = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+                    bot->DestroyItem(INVENTORY_SLOT_BAG_0, slot, true);
             }
-            bot->AutoUnequipOffhandIfNeed();
+
+            SlotChoice choice = ChooseBestCandidate(slot, cands, calculator);
+            if (choice.itemId == 0)
+                continue;
+
+            if (refinementPass)
+            {
+                EquipChoice(slot, choice);
+                continue;
+            }
+
+            Item* oldItem = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+
+            if (incremental && oldItem)
+            {
+                float oldScore = calculator.CalculateItem(oldItem->GetEntry(),
+                                                          oldItem->GetItemRandomPropertyId(), slot);
+                if (choice.score < 1.2f * oldScore)
+                    continue;
+            }
+
+            ReplaceEquippedItem(slot, choice);
         }
     }
+}
+
+void PlayerbotFactory::InitStartingOutfit()
+{
+    CharStartOutfitEntry const* oEntry =
+        GetCharStartOutfitEntry(bot->getRace(), bot->getClass(), bot->getGender());
+    if (!oEntry)
+        return;
+
+    for (int j = 0; j < MAX_OUTFIT_ITEMS; ++j)
+    {
+        if (oEntry->ItemId[j] <= 0)
+            continue;
+
+        uint32 itemId = oEntry->ItemId[j];
+        if (itemId == 6948)
+            continue;
+
+        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemId);
+        if (!proto)
+            continue;
+
+        if (proto->Class == ITEM_CLASS_CONSUMABLE && proto->SubClass == ITEM_SUBCLASS_FOOD)
+            continue;
+
+        uint32 count = proto->BuyCount;
+        if (bot->HasItemCount(itemId, count))
+            continue;
+
+        bot->StoreNewItemInBestSlots(itemId, count);
+    }
+}
+
+bool PlayerbotFactory::IsSlotAutoEquippable(uint8 slot) const
+{
+    if (slot == EQUIPMENT_SLOT_TABARD || slot == EQUIPMENT_SLOT_BODY)
+        return false;
+
+    if (level < 50 && (slot == EQUIPMENT_SLOT_TRINKET1 || slot == EQUIPMENT_SLOT_TRINKET2))
+        return false;
+    if (level < 30 && (slot == EQUIPMENT_SLOT_NECK || slot == EQUIPMENT_SLOT_HEAD))
+        return false;
+    if (level < 20 && (slot == EQUIPMENT_SLOT_FINGER1 || slot == EQUIPMENT_SLOT_FINGER2))
+        return false;
+    if (level < 5 && slot != EQUIPMENT_SLOT_MAINHAND && slot != EQUIPMENT_SLOT_OFFHAND &&
+        slot != EQUIPMENT_SLOT_FEET && slot != EQUIPMENT_SLOT_LEGS &&
+        slot != EQUIPMENT_SLOT_CHEST && slot != EQUIPMENT_SLOT_RANGED)
+        return false;
+
+    return true;
+}
+
+void PlayerbotFactory::ScrubInvalidEquippedItems()
+{
+    for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+    {
+        Item* item = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+        if (!item)
+            continue;
+
+        if (slot == EQUIPMENT_SLOT_TABARD || slot == EQUIPMENT_SLOT_BODY)
+            continue;
+
+        ItemTemplate const* proto = item->GetTemplate();
+        bool invalid = !proto
+                    || proto->RequiredLevel > bot->GetLevel()
+                    || bot->CanUseItem(proto) != EQUIP_ERR_OK;
+
+        if (invalid)
+            bot->DestroyItem(INVENTORY_SLOT_BAG_0, slot, true);
+    }
+}
+
+uint32 PlayerbotFactory::SelectPvpCcBreakTrinket()
+{
+    bool racialHasCcBreak = (bot->getRace() == RACE_HUMAN || bot->getRace() == RACE_UNDEAD_PLAYER);
+    if (level < 50 || racialHasCcBreak)
+        return 0;
+
+    for (uint32 itemId : ccBreakTrinketCache)
+    {
+        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemId);
+        if (!proto)
+            continue;
+        if (static_cast<int32>(proto->Quality) > itemQuality)
+            continue;
+        if (proto->RequiredLevel > level)
+            continue;
+        if (!CanEquipItem(proto))
+            continue;
+        uint16 dest;
+        if (!CanEquipUnseenItem(EQUIPMENT_SLOT_TRINKET1, dest, itemId))
+            continue;
+
+        return itemId;
+    }
+    return 0;
+}
+
+std::vector<PlayerbotFactory::EquipCandidate>
+PlayerbotFactory::BuildSlotCandidates(uint8 slot, StatsWeightCalculator& calc)
+{
+    std::vector<EquipCandidate> candidates;
+
+    uint32 delta = std::min<uint32>(bot->GetLevel(), 10u);
+
+    int32 desiredQuality = itemQuality;
+    if (urand(0, 100) < 100 * sPlayerbotAIConfig.randomGearLoweringChance &&
+        desiredQuality > ITEM_QUALITY_NORMAL)
+        --desiredQuality;
+
+    do
+    {
+        for (int32 reqLevel = static_cast<int32>(bot->GetLevel());
+             reqLevel > std::max<int32>(static_cast<int32>(bot->GetLevel()) - static_cast<int32>(delta), 0);
+             --reqLevel)
+        {
+            for (InventoryType invType : GetPossibleInventoryTypeListBySlot(static_cast<EquipmentSlots>(slot)))
+            {
+                for (uint32 itemId : sRandomItemMgr.GetEquipmentNew(reqLevel, invType))
+                {
+                    if (urand(1, 100) <= 25)
+                        continue;
+
+                    ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemId);
+                    if (!proto)
+                        continue;
+
+                    if (sPlayerbotAIConfig.limitGearExpansion && bot->GetLevel() <= 60 && itemId >= 23728)
+                        continue;
+                    if (sPlayerbotAIConfig.limitGearExpansion && bot->GetLevel() <= 70 && itemId >= 35570 &&
+                        itemId != 36737 && itemId != 37739 && itemId != 37740)
+                        continue;
+
+                    if (proto->Class != ITEM_CLASS_WEAPON && proto->Class != ITEM_CLASS_ARMOR)
+                        continue;
+                    if (proto->Quality != desiredQuality)
+                        continue;
+
+                    bool checkGS = desiredQuality > ITEM_QUALITY_NORMAL;
+                    if (checkGS && gearScoreLimit != 0 &&
+                        CalcMixedGearScore(proto->ItemLevel, proto->Quality) > gearScoreLimit)
+                        continue;
+
+                    if (proto->Class == ITEM_CLASS_ARMOR &&
+                        (slot == EQUIPMENT_SLOT_HEAD     || slot == EQUIPMENT_SLOT_SHOULDERS ||
+                         slot == EQUIPMENT_SLOT_CHEST    || slot == EQUIPMENT_SLOT_WAIST     ||
+                         slot == EQUIPMENT_SLOT_LEGS     || slot == EQUIPMENT_SLOT_FEET      ||
+                         slot == EQUIPMENT_SLOT_WRISTS   || slot == EQUIPMENT_SLOT_HANDS) &&
+                        !CanEquipArmor(proto))
+                        continue;
+
+                    if (proto->Class == ITEM_CLASS_WEAPON && !CanEquipWeapon(proto))
+                        continue;
+
+                    if (slot == EQUIPMENT_SLOT_OFFHAND && bot->getClass() == CLASS_ROGUE &&
+                        proto->Class != ITEM_CLASS_WEAPON)
+                        continue;
+
+                    int32 randomProp = 0;
+                    if (proto->RandomProperty || proto->RandomSuffix)
+                        randomProp = calc.PickBestRandomPropertyId(itemId);
+
+                    candidates.push_back(EquipCandidate{itemId, randomProp});
+                }
+            }
+        }
+    } while (candidates.size() < 25 && desiredQuality-- > ITEM_QUALITY_POOR);
+
+    return candidates;
+}
+
+PlayerbotFactory::SlotChoice
+PlayerbotFactory::ChooseBestCandidate(uint8 slot, std::vector<EquipCandidate> const& cands,
+                                      StatsWeightCalculator& calc)
+{
+    SlotChoice best;
+    for (EquipCandidate const& c : cands)
+    {
+        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(c.itemId);
+        if (!proto)
+            continue;
+
+        float score = calc.CalculateItem(c.itemId, c.randomProp, slot);
+
+        if (score > 0.0f && proto->Class == ITEM_CLASS_ARMOR && sPlayerbotAIConfig.preferClassArmorType)
+        {
+            uint8 preferred = GetPreferredArmorType(bot->getClass());
+            if (preferred != 0 && proto->SubClass == preferred)
+                score *= 3.0f;
+        }
+
+        if (score <= best.score)
+            continue;
+
+        if (!CanEquipItem(proto))
+            continue;
+        uint16 dest;
+        if (!CanEquipUnseenItem(slot, dest, c.itemId))
+            continue;
+
+        best = SlotChoice{c.itemId, c.randomProp, score};
+    }
+    return best;
+}
+
+bool PlayerbotFactory::ReplaceEquippedItem(uint8 slot, SlotChoice const& choice)
+{
+    Item* oldItem = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+
+    if (oldItem && oldItem->GetEntry() == choice.itemId &&
+        oldItem->GetItemRandomPropertyId() == choice.randomProp)
+        return true;
+
+    if (!oldItem)
+        return EquipChoice(slot, choice);
+
+    uint32 rollbackId = oldItem->GetEntry();
+    int32 rollbackProp = oldItem->GetItemRandomPropertyId();
+
+    if (!TryStashEquippedItem(slot))
+        return false;
+
+    if (EquipChoice(slot, choice))
+        return true;
+
+    TryEquipFromInventory(slot, rollbackId, rollbackProp);
+    return false;
+}
+
+bool PlayerbotFactory::TryStashEquippedItem(uint8 slot)
+{
+    Item* item = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+    if (!item)
+        return true;
+
+    uint8 bagIndex = item->GetBagSlot();
+    uint8 srcSlot  = item->GetSlot();
+    WorldPacket packet(CMSG_AUTOSTORE_BAG_ITEM, 3);
+    packet << bagIndex << srcSlot << uint8(NULL_BAG);
+    WorldPackets::Item::AutoStoreBagItem store(std::move(packet));
+    store.Read();
+    bot->GetSession()->HandleAutoStoreBagItemOpcode(store);
+
+    return bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot) == nullptr;
+}
+
+bool PlayerbotFactory::EquipChoice(uint8 slot, SlotChoice const& choice)
+{
+    uint16 dest;
+    if (!CanEquipUnseenItem(slot, dest, choice.itemId))
+        return false;
+
+    Item* equipped = bot->EquipNewItem(dest, choice.itemId, true);
+    if (!equipped && !TryEquipFromInventory(slot, choice.itemId, choice.randomProp))
+        return false;
+
+    if (!equipped)
+        equipped = bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+
+    if (!equipped)
+        return false;
+
+    if (choice.randomProp != 0 && equipped->GetItemRandomPropertyId() != choice.randomProp)
+    {
+        uint8 equipSlot = equipped->GetSlot();
+        bot->_ApplyItemMods(equipped, equipSlot, false);
+        equipped->SetItemRandomProperties(choice.randomProp);
+        bot->_ApplyItemMods(equipped, equipSlot, true);
+    }
+
+    bot->AutoUnequipOffhandIfNeed();
+    return true;
+}
+
+bool PlayerbotFactory::TryEquipFromInventory(uint8 equipSlot, uint32 itemId, int32 randomProp)
+{
+    auto tryItem = [&](Item* item) -> bool
+    {
+        if (!item || item->GetEntry() != itemId)
+            return false;
+        if (randomProp != 0 && item->GetItemRandomPropertyId() != randomProp)
+            return false;
+
+        WorldPacket packet(CMSG_AUTOEQUIP_ITEM_SLOT, 2);
+        packet << item->GetGUID() << equipSlot;
+        WorldPackets::Item::AutoEquipItemSlot equipPacket(std::move(packet));
+        equipPacket.Read();
+        bot->GetSession()->HandleAutoEquipItemSlotOpcode(equipPacket);
+        return bot->GetItemByPos(INVENTORY_SLOT_BAG_0, equipSlot) != nullptr;
+    };
+
+    for (uint32 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
+        if (tryItem(bot->GetItemByPos(INVENTORY_SLOT_BAG_0, i)))
+            return true;
+
+    for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)
+    {
+        Bag* container = bot->GetBagByPos(bag);
+        if (!container)
+            continue;
+        for (uint32 j = 0; j < container->GetBagSize(); ++j)
+            if (tryItem(container->GetItemByPos(j)))
+                return true;
+    }
+
+    return false;
 }
 
 bool PlayerbotFactory::IsDesiredReplacement(Item* item)

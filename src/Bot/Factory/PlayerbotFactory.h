@@ -15,6 +15,7 @@
 #include "PlayerbotAI.h"
 
 class Item;
+class StatsWeightCalculator;
 
 struct ItemTemplate;
 
@@ -205,6 +206,20 @@ private:
     Item* StoreItem(uint32 itemId, uint32 count);
     void InitArenaTeam();
     void InitImmersive();
+    struct EquipCandidate { uint32 itemId = 0; int32 randomProp = 0; };
+    struct SlotChoice     { uint32 itemId = 0; int32 randomProp = 0; float score = -1.0f; };
+
+    void InitStartingOutfit();
+    bool IsSlotAutoEquippable(uint8 slot) const;
+    void ScrubInvalidEquippedItems();
+    uint32 SelectPvpCcBreakTrinket();
+    std::vector<EquipCandidate> BuildSlotCandidates(uint8 slot, StatsWeightCalculator& calc);
+    SlotChoice ChooseBestCandidate(uint8 slot, std::vector<EquipCandidate> const& cands,
+                                   StatsWeightCalculator& calc);
+    bool ReplaceEquippedItem(uint8 slot, SlotChoice const& choice);
+    bool EquipChoice(uint8 slot, SlotChoice const& choice);
+    bool TryEquipFromInventory(uint8 slot, uint32 itemId, int32 randomProp = 0);
+    bool TryStashEquippedItem(uint8 slot);
     static void AddPrevQuests(uint32 questId, std::list<uint32>& questIds);
     void LoadEnchantContainer();
     void ApplyEnchantTemplate();
