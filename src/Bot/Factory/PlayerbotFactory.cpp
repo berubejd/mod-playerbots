@@ -109,6 +109,146 @@ constexpr uint32 SPELL_IMPROVED_HOWL_OF_TERROR = 30057;
 constexpr uint32 SPELL_NEMESIS = 63123;
 constexpr uint32 SPELL_INTENSITY = 18136;
 constexpr uint32 SPELL_NETHER_PROTECTION = 30302;
+
+uint8 GetTalentMaxRankIndex(TalentEntry const* talentInfo)
+{
+    if (!talentInfo)
+        return 0;
+
+    uint8 maxRank = 0;
+    for (uint8 rank = 0; rank < MAX_TALENT_RANK; ++rank)
+    {
+        if (talentInfo->RankID[rank])
+            maxRank = rank;
+    }
+    return maxRank;
+}
+
+uint8 GetPetTalentPointCount(Pet const* pet, TalentEntry const* talentInfo)
+{
+    if (!pet || !talentInfo)
+        return 0;
+
+    uint8 points = 0;
+    for (uint8 rank = 0; rank < MAX_TALENT_RANK; ++rank)
+    {
+        if (talentInfo->RankID[rank] && pet->HasSpell(talentInfo->RankID[rank]))
+            points = rank + 1;
+    }
+    return points;
+}
+
+void LearnPetDependency(Player* bot, Pet* pet, TalentEntry const* talentInfo)
+{
+    if (!talentInfo->DependsOn)
+        return;
+
+    TalentEntry const* depInfo = sTalentStore.LookupEntry(talentInfo->DependsOn);
+    if (!depInfo)
+        return;
+
+    uint32 petFree = pet->GetFreeTalentPoints();
+    if (!petFree)
+        return;
+
+    uint32 depRank = std::min(talentInfo->DependsOnRank, static_cast<uint32>(GetTalentMaxRankIndex(depInfo)));
+    bot->LearnPetTalent(pet->GetGUID(), talentInfo->DependsOn, std::min(depRank, petFree - 1));
+}
+
+void LearnPetTalentClamped(Player* bot, Pet* pet, uint32 talentId, uint32 targetRankIndex)
+{
+    TalentEntry const* talentInfo = sTalentStore.LookupEntry(talentId);
+    if (!talentInfo)
+        return;
+
+    targetRankIndex = std::min(targetRankIndex, static_cast<uint32>(GetTalentMaxRankIndex(talentInfo)));
+    if (!talentInfo->RankID[targetRankIndex])
+        return;
+
+    bot->LearnPetTalent(pet->GetGUID(), talentId, targetRankIndex);
+}
+
+uint8 GetPlayerTalentPointCount(Player const* player, TalentEntry const* talentInfo)
+{
+    if (!player || !talentInfo)
+        return 0;
+
+    uint8 points = 0;
+    for (uint8 rank = 0; rank < MAX_TALENT_RANK; ++rank)
+    {
+        if (talentInfo->RankID[rank] && player->HasTalent(talentInfo->RankID[rank], player->GetActiveSpec()))
+            points = rank + 1;
+    }
+    return points;
+}
+
+void LearnPlayerDependency(Player* player, TalentEntry const* talentInfo)
+{
+    if (!talentInfo->DependsOn)
+        return;
+
+    TalentEntry const* depInfo = sTalentStore.LookupEntry(talentInfo->DependsOn);
+    if (!depInfo)
+        return;
+
+    uint32 playerFree = player->GetFreeTalentPoints();
+    if (!playerFree)
+        return;
+
+    uint32 depRank = std::min(talentInfo->DependsOnRank, static_cast<uint32>(GetTalentMaxRankIndex(depInfo)));
+    player->LearnTalent(talentInfo->DependsOn, std::min(depRank, playerFree - 1));
+}
+
+uint32 ComputeClampedPlayerTalentRank(Player* player, TalentEntry const* talentInfo, uint32 lvl)
+{
+    uint8 maxRankIndex = GetTalentMaxRankIndex(talentInfo);
+    uint32 targetPoints = std::min(lvl, static_cast<uint32>(maxRankIndex + 1));
+    uint8 currentPoints = GetPlayerTalentPointCount(player, talentInfo);
+    if (targetPoints <= currentPoints)
+        return MAX_TALENT_RANK;
+
+    uint32 playerFree = player->GetFreeTalentPoints();
+    if (!playerFree)
+        return MAX_TALENT_RANK;
+
+    uint32 learnLevel = std::min(targetPoints, playerFree + currentPoints);
+    if (!learnLevel)
+        return MAX_TALENT_RANK;
+
+    return std::min(learnLevel - 1, static_cast<uint32>(maxRankIndex));
+}
+
+uint32 ComputeClampedPetTalentRank(Pet* pet, TalentEntry const* talentInfo, uint32 lvl)
+{
+    uint8 maxRankIndex = GetTalentMaxRankIndex(talentInfo);
+    uint32 targetPoints = std::min(lvl, static_cast<uint32>(maxRankIndex + 1));
+    uint8 currentPoints = GetPetTalentPointCount(pet, talentInfo);
+    if (targetPoints <= currentPoints)
+        return MAX_TALENT_RANK;
+
+    uint32 petFree = pet->GetFreeTalentPoints();
+    if (!petFree)
+        return MAX_TALENT_RANK;
+
+    uint32 learnLevel = std::min(targetPoints, petFree + currentPoints);
+    if (!learnLevel)
+        return MAX_TALENT_RANK;
+
+    return std::min(learnLevel - 1, static_cast<uint32>(maxRankIndex));
+}
+
+void LearnTalentClamped(Player* player, uint32 talentId, uint32 targetRankIndex)
+{
+    TalentEntry const* talentInfo = sTalentStore.LookupEntry(talentId);
+    if (!talentInfo)
+        return;
+
+    targetRankIndex = std::min(targetRankIndex, static_cast<uint32>(GetTalentMaxRankIndex(talentInfo)));
+    if (!talentInfo->RankID[targetRankIndex])
+        return;
+
+    player->LearnTalent(talentId, targetRankIndex);
+}
 }
 
 bool PlayerbotFactory::IsPrimaryTradeSkill(uint16 skillId)
@@ -1206,14 +1346,11 @@ void PlayerbotFactory::InitPetTalents()
 
                     maxRank = rank;
                 }
+                maxRank = std::min(maxRank, static_cast<int>(GetTalentMaxRankIndex(talentInfo)));
                 // LOG_INFO("playerbots", "{} learn pet talent {}({})", bot->GetName().c_str(), talentInfo->TalentID,
                 // maxRank);
-                if (talentInfo->DependsOn)
-                {
-                    bot->LearnPetTalent(pet->GetGUID(), talentInfo->DependsOn,
-                                        std::min(talentInfo->DependsOnRank, bot->GetFreeTalentPoints() - 1));
-                }
-                bot->LearnPetTalent(pet->GetGUID(), talentInfo->TalentID, maxRank);
+                LearnPetDependency(bot, pet, talentInfo);
+                LearnPetTalentClamped(bot, pet, talentInfo->TalentID, maxRank);
                 spells_row.erase(spells_row.begin() + index);
             }
         }
@@ -1244,25 +1381,12 @@ void PlayerbotFactory::InitPetTalents()
                     {
                         continue;
                     }
-                    if (talentInfo->DependsOn)
-                    {
-                        bot->LearnPetTalent(pet->GetGUID(), talentInfo->DependsOn,
-                                            std::min(talentInfo->DependsOnRank, bot->GetFreeTalentPoints() - 1));
-                    }
+                    LearnPetDependency(bot, pet, talentInfo);
                     talentID = talentInfo->TalentID;
-
-                    uint32 currentTalentRank = 0;
-                    for (uint8 rank = 0; rank < MAX_TALENT_RANK; ++rank)
-                    {
-                        if (talentInfo->RankID[rank] && pet->HasSpell(talentInfo->RankID[rank]))
-                        {
-                            currentTalentRank = rank + 1;
-                            break;
-                        }
-                    }
-                    learnLevel = std::min(lvl, pet->GetFreeTalentPoints() + currentTalentRank) - 1;
+                    learnLevel = ComputeClampedPetTalentRank(pet, talentInfo, lvl);
                 }
-                bot->LearnPetTalent(pet->GetGUID(), talentID, learnLevel);
+                if (talentID && learnLevel < MAX_TALENT_RANK)
+                    LearnPetTalentClamped(bot, pet, talentID, learnLevel);
                 if (pet->GetFreeTalentPoints() == 0)
                 {
                     break;
@@ -1646,12 +1770,20 @@ void PlayerbotFactory::InitTalentsBySpecNo(Player* bot, int specNo, bool reset)
                 }
                 if (talentInfo->DependsOn)
                 {
-                    bot->LearnTalent(talentInfo->DependsOn,
-                                     std::min(talentInfo->DependsOnRank, bot->GetFreeTalentPoints() - 1));
+                    LearnPlayerDependency(bot, talentInfo);
                 }
                 talentID = talentInfo->TalentID;
             }
-            bot->LearnTalent(talentID, std::min(lvl, bot->GetFreeTalentPoints()) - 1);
+            if (talentID != static_cast<uint32>(-1))
+            {
+                TalentEntry const* talentInfo = sTalentStore.LookupEntry(talentID);
+                if (talentInfo)
+                {
+                    uint32 learnLevel = ComputeClampedPlayerTalentRank(bot, talentInfo, lvl);
+                    if (learnLevel < MAX_TALENT_RANK)
+                        LearnTalentClamped(bot, talentID, learnLevel);
+                }
+            }
             if (bot->GetFreeTalentPoints() == 0)
             {
                 break;
@@ -1720,12 +1852,20 @@ void PlayerbotFactory::InitTalentsByParsedSpecLink(Player* bot, std::vector<std:
             }
             if (talentInfo->DependsOn)
             {
-                bot->LearnTalent(talentInfo->DependsOn,
-                                 std::min(talentInfo->DependsOnRank, bot->GetFreeTalentPoints() - 1));
+                LearnPlayerDependency(bot, talentInfo);
             }
             talentID = talentInfo->TalentID;
         }
-        bot->LearnTalent(talentID, std::min(lvl, bot->GetFreeTalentPoints()) - 1);
+        if (talentID != static_cast<uint32>(-1))
+        {
+            TalentEntry const* talentInfo = sTalentStore.LookupEntry(talentID);
+            if (talentInfo)
+            {
+                uint32 learnLevel = ComputeClampedPlayerTalentRank(bot, talentInfo, lvl);
+                if (learnLevel < MAX_TALENT_RANK)
+                    LearnTalentClamped(bot, talentID, learnLevel);
+            }
+        }
         if (bot->GetFreeTalentPoints() == 0)
         {
             break;
@@ -3437,12 +3577,9 @@ void PlayerbotFactory::InitTalents(uint32 specNo)
 
                 maxRank = rank;
             }
-            if (talentInfo->DependsOn)
-            {
-                bot->LearnTalent(talentInfo->DependsOn,
-                                 std::min(talentInfo->DependsOnRank, bot->GetFreeTalentPoints() - 1));
-            }
-            bot->LearnTalent(talentInfo->TalentID, maxRank);
+                maxRank = std::min(maxRank, static_cast<int>(GetTalentMaxRankIndex(talentInfo)));
+            LearnPlayerDependency(bot, talentInfo);
+            LearnTalentClamped(bot, talentInfo->TalentID, maxRank);
             spells_row.erase(spells_row.begin() + index);
         }
 
@@ -3514,25 +3651,12 @@ void PlayerbotFactory::InitTalentsByTemplate(uint32 specTab)
                 {
                     continue;
                 }
-                if (talentInfo->DependsOn)
-                {
-                    bot->LearnTalent(talentInfo->DependsOn,
-                                     std::min(talentInfo->DependsOnRank, bot->GetFreeTalentPoints() - 1));
-                }
+                LearnPlayerDependency(bot, talentInfo);
                 talentID = talentInfo->TalentID;
-
-                uint32 currentTalentRank = 0;
-                for (uint8 rank = 0; rank < MAX_TALENT_RANK; ++rank)
-                {
-                    if (talentInfo->RankID[rank] && bot->HasTalent(talentInfo->RankID[rank], bot->GetActiveSpec()))
-                    {
-                        currentTalentRank = rank + 1;
-                        break;
-                    }
-                }
-                learnLevel = std::min(lvl, bot->GetFreeTalentPoints() + currentTalentRank) - 1;
+                learnLevel = ComputeClampedPlayerTalentRank(bot, talentInfo, lvl);
             }
-            bot->LearnTalent(talentID, learnLevel);
+            if (talentID && learnLevel < MAX_TALENT_RANK)
+                LearnTalentClamped(bot, talentID, learnLevel);
             if (bot->GetFreeTalentPoints() == 0)
             {
                 break;
